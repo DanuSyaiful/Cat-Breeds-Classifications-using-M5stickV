@@ -1,0 +1,326 @@
+# See https://github.com/raghakot/keras-vis/issues/182
+!pip install -I scipy==1.2.*
+# Clone the repositopry to get the MobileNet V1 model by DmitryM8
+!git clone https://github.com/AIWintermuteAI/transfer_learning_sipeed.git
+import keras
+import numpy as np
+from keras import backend as K
+from keras.optimizers import Adam
+from keras.metrics import categorical_crossentropy
+from keras.preprocessing.image import ImageDataGenerator
+from keras.preprocessing import image
+from keras.models import Model
+from keras.applications import imagenet_utils
+from keras.layers import Dense, GlobalAveragePooling2D, Dropout,Flatten
+from keras.applications.mobilenet import preprocess_input
+import sys
+sys.path.append('/content/transfer_learning_sipeed')
+from mobilenet_sipeed.mobilenet import MobileNet
+dataset_url:" "
+dataset_root_dir = '/content/datasets'
+dataset_tmp_filename = 'dataset.zip'
+
+import os
+
+# Make the directory for datasets if needed
+if not os.path.isdir(dataset_root_dir):
+  os.mkdir(dataset_root_dir)
+
+# Download the dataset file from the URL as dataset.zip
+get_ipython().system_raw('wget -O {} {}'.format(dataset_tmp_filename, dataset_url))
+import zipfile
+
+dataset_name = ''
+
+with zipfile.ZipFile(dataset_tmp_filename) as zipfile:
+    # Get the name of the root directory as the name of the dataset
+    dataset_name = os.path.dirname(zipfile.namelist()[0]).split(os.sep)[0]
+    zipfile.extractall(dataset_root_dir)
+
+dataset_name
+IMAGE_SIZE = 224
+ALPHA = 0.75
+BATCH_SIZE = 32
+EPOCHS = 20
+def prepare_image(file):
+    img_path = ''
+    img = image.load_img(img_path + file, target_size=(IMAGE_SIZE, IMAGE_SIZE))
+    img_array = image.img_to_array(img)
+    img_array_expanded_dims = np.expand_dims(img_array, axis=0)
+    return keras.applications.mobilenet.preprocess_input(img_array_expanded_dims)
+dataset_dir = os.path.join(dataset_root_dir, dataset_name)
+
+# Uncomment parameters to enable data augmentation
+train_data_gen = ImageDataGenerator(preprocessing_function=preprocess_input,
+                                    # rotation_range=10,
+                                    # width_shift_range=0.2,
+                                    # height_shift_range=0.2,
+                                    # shear_range=0.2,
+                                    # zoom_range=0.3,
+                                    # horizontal_flip=True,
+                                    validation_split=0.1)
+
+train_data = train_data_gen.flow_from_directory(dataset_dir,
+                                                subset='training',
+                                                target_size=(IMAGE_SIZE, IMAGE_SIZE),
+                                                color_mode='rgb',
+                                                batch_size=BATCH_SIZE,
+                                                class_mode='categorical',
+                                                shuffle=True)
+
+validation_data = train_data_gen.flow_from_directory(dataset_dir,
+                                                     subset='validation',
+                                                     target_size=(IMAGE_SIZE, IMAGE_SIZE),
+                                                     color_mode='rgb',
+                                                     batch_size=BATCH_SIZE,
+                                                     class_mode='categorical',
+                                                     shuffle=True)
+train_data.class_indices.items()
+# Write labels as labels.txt
+with open('labels.txt', 'wt') as f:
+    for key, value in train_data.class_indices.items():
+        f.write(key + '\n')
+# Using MobileNet V1
+# See https://keras.io/applications/#mobilenet for details
+base_model = MobileNet(input_shape=(IMAGE_SIZE, IMAGE_SIZE, 3),
+                       alpha=ALPHA,
+                       include_top=False,
+                       backend=keras.backend,
+                       layers=keras.layers,
+                       models=keras.models,
+                       utils=keras.utils)
+# Make all layers non-trainable
+for layer in base_model.layers:
+    layer.trainable = False
+
+# Add layers for transfer learning
+x = base_model.output
+x = GlobalAveragePooling2D()(x)
+x = Dense(100, activation='relu')(x)
+x = Dropout(0.5)(x)
+x = Dense(50, activation='relu')(x)
+x = Dropout(0.5)(x)
+predictions = Dense(train_data.num_classes, activation='softmax')(x)
+model = Model(inputs=base_model.input, outputs=predictions)
+
+model.summary()
+
+model.compile(optimizer=Adam(lr=0.0005), loss=keras.losses.categorical_crossentropy,
+              metrics=['accuracy'])
+
+steps_per_epoch = train_data.n // train_data.batch_size
+validation_steps = max(validation_data.n // validation_data.batch_size, 1)
+
+history = model.fit_generator(train_data,
+                              steps_per_epoch=steps_per_epoch,
+                              epochs=EPOCHS,
+                              validation_data=validation_data,
+                              validation_steps=validation_steps)
+
+model.save('/content/model.h5')
+
+# https://nbviewer.jupyter.org/github/fchollet/deep-learning-with-python-notebooks/blob/master/5.2-using-convnets-with-small-datasets.ipynb#5.2---Using-convnets-with-small-datasets
+import matplotlib.pyplot as plt
+%matplotlib inline
+
+acc = history.history['acc']
+val_acc = history.history['val_acc']
+loss = history.history['loss']
+val_loss = history.history['val_loss']
+
+epochs = range(len(acc))
+
+plt.figure()
+plt.ylim(0, 1)
+plt.plot(epochs, acc, 'bo', label='Training acc')
+plt.plot(epochs, val_acc, 'b', label='Validation acc')
+plt.title('Training and validation accuracy')
+plt.legend()
+
+plt.figure()
+plt.plot(epochs, loss, 'bo', label='Training loss')
+plt.plot(epochs, val_loss, 'b', label='Validation loss')
+plt.title('Training and validation loss')
+plt.legend()
+
+plt.show()
+
+# Get the ordered list of class names:
+import PIL.Image as Image
+class_names = validation_data.class_indices.items()
+class_names = np.array([key.title() for key, value in class_names])
+
+validation_data.reset()
+validation_data.shuffle = False
+validation_data.batch_size = BATCH_SIZE
+
+# Retrieve the first batch from the validation data
+for validation_image_batch, validation_label_batch in validation_data:
+  break
+
+validation_id = np.argmax(validation_label_batch, axis=-1)
+validation_label = class_names[validation_id]
+predicted_batch = model.predict(validation_image_batch)
+
+# Returns the indices of the maximum values along a given axis
+predicted_id = np.argmax(predicted_batch, axis=-1)
+
+# Return the maximum values along a given axis
+predicted_score = np.max(predicted_batch, axis=-1)
+
+predicted_label_batch = class_names[predicted_id]
+
+plt.figure(figsize=(16, 9))
+plt.subplots_adjust(hspace=0.5)
+
+# Display the classification results for the first 30 images
+for n in range(min(validation_image_batch.shape[0], 30)):
+  plt.subplot(6, 5, n + 1)
+
+  # Convert the range from -1 to 1 to the range from 0 to 1
+  plt.imshow((validation_image_batch[n] + 1) / 2)
+  color = 'green' if predicted_id[n] == validation_id[n] else 'red'
+  predicted_label = predicted_label_batch[n].title()
+  plt.title(predicted_label + ' ({:.2f}, {})'.format(
+      predicted_score[n], validation_label[n]), color=color)
+  plt.axis('off')
+
+_ = plt.suptitle('Model predictions (green: correct, red: incorrect)')
+
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+
+validation_data.reset()
+validation_data.shuffle = False
+validation_data.batch_size = 1
+
+predicted = model.predict_generator(validation_data, steps=validation_data.n)
+predicted_classes = np.argmax(predicted, axis=-1)
+
+# Apply normalization
+# https://scikit-learn.org/stable/auto_examples/model_selection/plot_confusion_matrix.html
+cm = confusion_matrix(validation_data.classes, predicted_classes)
+cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+
+plt.figure(figsize=(12, 9))
+
+# https://seaborn.pydata.org/generated/seaborn.heatmap.html
+# https://matplotlib.org/users/colormaps.html
+sns.heatmap(cm, annot=True, square=True, cmap=plt.cm.Blues,
+            xticklabels=validation_data.class_indices,
+            yticklabels=validation_data.class_indices)
+
+plt.title("Confusion Matrix")
+plt.ylabel('True label')
+plt.xlabel('Predicted label')
+plt.show()
+
+from vis.utils import utils
+from vis.visualization import visualize_cam, overlay
+
+# Specify the final layer (i.e., dense_3 at an initial run)
+layer_idx = len(model.layers) - 1
+
+import progressbar
+
+plt.figure(figsize=(16, 9))
+plt.subplots_adjust(hspace=0.5)
+
+# Display the Grad-CAM heatmaps for the first 30 images at maximum
+num_images = min(validation_image_batch.shape[0], 30)
+
+progress_bar = progressbar.ProgressBar(1, num_images,
+                                       widgets=[progressbar.Counter(),
+                                                ' of {}'.format(num_images),
+                                                progressbar.Bar(),
+                                                progressbar.ETA()])
+
+for n in range(num_images):
+  plt.subplot(6, 5, n + 1)
+  grads = visualize_cam(model, layer_idx,
+                        filter_indices=predicted_id[n],
+                        seed_input=validation_image_batch[n],
+                        backprop_modifier=None)
+
+  # Convert the range from -1 to 1 to the range from 0 to 255
+  source_img = (validation_image_batch[n] + 1) * 127.5
+  source_img = source_img.astype(np.uint8)
+
+  comparison_img = np.concatenate(
+      [source_img, overlay(grads, source_img)], axis=1)
+
+  plt.imshow(comparison_img)
+
+  color = 'green' if predicted_id[n] == validation_id[n] else 'red'
+  predicted_label = predicted_label_batch[n].title()
+  plt.title(predicted_label + ' ({:.2f}, {})'.format(
+      predicted_score[n], validation_label[n]), color=color)
+  plt.axis('off')
+
+  progress_bar.update(n + 1)
+
+_ = plt.suptitle('Grad-CAM (green: correct, red: incorrect)')
+
+!git clone https://github.com/sipeed/Maix_Toolbox.git
+
+%%bash
+cd Maix_Toolbox 
+mkdir -p ncc
+mkdir -p workspace
+mkdir -p images
+mkdir -p log
+cd ncc
+wget https://github.com/kendryte/nncase/releases/download/v0.1.0-rc5/ncc-linux-x86_64.tar.xz
+tar -Jxf ncc-linux-x86_64.tar.xz
+rm ncc-linux-x86_64.tar.xz
+echo "download nncase ok!"
+
+#convert keras to tflite format
+!tflite_convert  --output_file=/content/model.tflite --keras_model_file=/content/model.h5
+
+import shutil
+
+test_dataset_dir = '/content/test'
+
+if not os.path.isdir(test_dataset_dir):
+  os.mkdir(test_dataset_dir)
+
+for key, value in validation_data.class_indices.items():
+  src_dir = os.path.join(dataset_root_dir, dataset_name, key)
+  dest_dir = os.path.join(test_dataset_dir, key)
+
+  if not os.path.isdir(dest_dir):
+    os.mkdir(dest_dir)
+
+  count = 0
+  for item in os.listdir(src_dir):
+    file_path = os.path.join(src_dir, item)
+
+    if os.path.isfile(file_path):
+      shutil.copy(file_path, dest_dir)
+
+    count += 1
+
+    if count == 10:
+      break
+
+%cd /content/Maix_Toolbox
+!./ncc/ncc -i tflite -o k210model --dataset /content/test /content/model.tflite /content/model.kmodel
+
+# Get the script to be used on a M5StickV
+%cd /content
+!git clone https://gist.github.com/65b06e10be209607bf9ca63748564ee9.git
+
+from datetime import datetime
+from pytz import timezone
+import zipfile
+
+now = datetime.now(timezone('UTC'))
+now = now.astimezone(timezone('Asia/Tokyo'))
+zipped_model_path = '/content/model_{0:%Y-%m-%d_%H-%M-%S}.zip'.format(now)
+
+with zipfile.ZipFile(zipped_model_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipped_model:
+  zipped_model.write('/content/model.kmodel', arcname='model.kmodel')
+  zipped_model.write('/content/labels.txt', arcname='labels.txt')
+  zipped_model.write('/content/65b06e10be209607bf9ca63748564ee9/boot.py', arcname='boot.py')
+
